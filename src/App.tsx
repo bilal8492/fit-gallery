@@ -7,7 +7,6 @@ import Dashboard from './pages/Dashboard';
 
 function ProtectedRoute({ children }: { children: JSX.Element }) {
   const { user, loading } = useSupabaseUser();
-  console.log("🚀 ~ ProtectedRoute ~ user:", user)
 
   if (loading) {
     return <div>Loading...</div>;

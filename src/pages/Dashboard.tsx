@@ -3,7 +3,6 @@ import Navbar from "../components/Navbar";
 import { supabase } from "../lib/supabaseClient";
 import { useSupabaseUser } from "../hooks/useSupabaseUser";
 
-
 type Post = {
   id: string;
   user_id: string;
@@ -15,17 +14,18 @@ type Post = {
 
 function Dashboard() {
   const user = useSupabaseUser();
-  console.log("🚀 ~ Dashboard ~ user:", user);
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [posts, setPosts] = useState<any[]>([]);
 
- const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(false);
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState("");
   const [editDescription, setEditDescription] = useState("");
-  
+
+  const [file, setFile] = useState<File | null>(null);
+
   // Fetch posts when user is ready
   useEffect(() => {
     if (user) {
@@ -35,7 +35,7 @@ function Dashboard() {
 
   const fetchPosts = useCallback(async () => {
     if (!user) return;
-    setLoading(true)
+    setLoading(true);
     const { data, error } = await supabase
       .from("posts")
       .select("*")
@@ -43,35 +43,55 @@ function Dashboard() {
       .order("created_at", { ascending: false });
 
     if (!error) setPosts(data || []);
-    setLoading(false)
-  },[user.user?.id]);
+    setLoading(false);
+  }, [user.user?.id]);
 
-  const handleCreatePost = useCallback(
-    async (e: React.FormEvent) => {
-      e.preventDefault();
-      if (!user) return;
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const selected = e.target.files?.[0];
+    setFile(selected || null);
+  };
 
-      const { error } = await supabase.from("posts").insert([
-        {
-          user_id: user.user?.id,
-          title,
-          description,
-          image_url: "", // later S3
-        },
-      ]);
+  const handleCreatePost = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user) return;
 
-      if (error) {
-        console.error(error);
-        return;
+    let imageUrl = "";
+
+    if (file) {
+      const fileExt = file.name.split(".").pop();
+      const filePath = `${user.user?.id}/${Date.now()}.${fileExt}`;
+
+      const { error: uploadError } = await supabase.storage
+        .from("post-images")
+        .upload(filePath, file);
+
+      if (uploadError) {
+        console.error("Upload error:", uploadError.message);
+      } else {
+        const { data: publicUrlData } = supabase.storage
+          .from("post-images")
+          .getPublicUrl(filePath);
+        imageUrl = publicUrlData.publicUrl;
       }
+    }
 
+    const { error } = await supabase.from("posts").insert([
+      {
+        user_id: user.user?.id,
+        title,
+        description,
+        image_url: imageUrl,
+      },
+    ]);
+
+    if (!error) {
       setTitle("");
       setDescription("");
-      fetchPosts(); // Refresh list
-    },
-    [title, description, user, fetchPosts]
-  );
-  
+      setFile(null);
+      fetchPosts();
+    }
+  };
+
   const startEditing = (post: Post) => {
     setEditingId(post.id);
     setEditTitle(post.title);
@@ -84,7 +104,7 @@ function Dashboard() {
     setEditDescription("");
   };
 
-   const handleUpdatePost = async (e: React.FormEvent) => {
+  const handleUpdatePost = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingId || !user) return;
 
@@ -107,24 +127,60 @@ function Dashboard() {
   };
 
   const handleDeletePost = async (id: string) => {
-    if (!user) return;
-    const confirmDelete = window.confirm("Are you sure you want to delete this post?");
-    if (!confirmDelete) return;
+  if (!user) return;
 
-    const { error } = await supabase
-      .from("posts")
-      .delete()
-      .eq("id", id)
-      .eq("user_id", user.user?.id); // extra safety, RLS also restricts
+  const confirmDelete = window.confirm("Are you sure?");
+  if (!confirmDelete) return;
 
-    if (error) {
-      console.error("Error deleting post:", error.message);
-      return;
+  // 1️⃣ Get real image URL from DB
+  const { data: post, error: fetchError } = await supabase
+    .from("posts")
+    .select("image_url")
+    .eq("id", id)
+    .single();
+
+  if (fetchError) {
+    console.error("Fetch error:", fetchError.message);
+    return;
+  }
+
+  const imageUrl = post?.image_url;
+
+  // 2️⃣ Delete from storage
+  if (imageUrl) {
+    const url = new URL(imageUrl);
+    const pathname = url.pathname;
+    const filePath = pathname.split("/post-images/")[1];
+
+    console.log("🗑 Deleting storage key:", filePath);
+
+    const { data, error: storageError } = await supabase.storage
+      .from("post-images")
+      .remove([filePath]);
+
+    if (storageError) {
+      console.error("Storage delete error:", storageError.message);
+    } else {
+      console.log("🔥 Storage delete success:", data);
     }
+  }
 
-    // Optimistic update
-    setPosts(prev => prev.filter(p => p.id !== id));
-  };
+  // 3️⃣ Delete DB row
+  const { error } = await supabase
+    .from("posts")
+    .delete()
+    .eq("id", id)
+    .eq("user_id", user.user?.id);
+
+  if (error) {
+    console.error("DB delete error:", error.message);
+    return;
+  }
+
+  setPosts((prev) => prev.filter((p) => p.id !== id));
+};
+
+
   return (
     <>
       <div>Dashboard</div>
@@ -151,6 +207,15 @@ function Dashboard() {
               style={{ width: "100%", padding: 8, minHeight: 60 }}
             />
           </div>
+          <div style={{ marginBottom: 8 }}>
+            <input
+              type="file"
+              accept="image/*"
+              onChange={handleFileChange}
+              style={{ marginBottom: 8 }}
+            />
+          </div>
+
           <button type="submit">Add Post</button>
         </form>
       </section>
@@ -185,7 +250,12 @@ function Dashboard() {
                   <textarea
                     value={editDescription}
                     onChange={(e) => setEditDescription(e.target.value)}
-                    style={{ width: "100%", padding: 6, minHeight: 60, marginBottom: 8 }}
+                    style={{
+                      width: "100%",
+                      padding: 6,
+                      minHeight: 60,
+                      marginBottom: 8,
+                    }}
                   />
                   <button type="submit" style={{ marginRight: 8 }}>
                     Save
@@ -199,6 +269,19 @@ function Dashboard() {
                 <>
                   <strong>{post.title}</strong>
                   <p style={{ margin: "4px 0 8px" }}>{post.description}</p>
+                  {post.image_url && (
+                    <div>
+                      <img
+                        src={post.image_url}
+                        alt="post"
+                        style={{
+                          width: "100%",
+                          borderRadius: 8,
+                          marginBottom: 8,
+                        }}
+                      />
+                    </div>
+                  )}
                   <small>{new Date(post.created_at).toLocaleString()}</small>
                   <div style={{ marginTop: 8 }}>
                     <button
@@ -207,7 +290,11 @@ function Dashboard() {
                     >
                       Edit
                     </button>
-                    <button onClick={() => handleDeletePost(post.id)}>Delete</button>
+                    <button
+                      onClick={() => handleDeletePost(post.id)}
+                    >
+                      Delete
+                    </button>
                   </div>
                 </>
               )}
